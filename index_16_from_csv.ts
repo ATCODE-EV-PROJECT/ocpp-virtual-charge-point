@@ -11,10 +11,15 @@ import { VCP } from "./src/vcp";
  * Reads chargers from a CSV file and spins up a VCP for each one.
  * Uses the ocpp_identity column as the chargePointId.
  * Usage: npm start index_16_from_csv.ts
- * Optional env: CSV_PATH (default: tohsamples/chargers.csv), ACTIVE_ONLY (default: true)
+ * Optional env:
+ *   CSV_PATH          (default: tohsamples/chargers.csv)
+ *   CONNECTORS_PATH   (default: tohsamples/connectors.csv if it exists)
+ *   ACTIVE_ONLY       (default: true)
  */
 
 const csvPath = process.env.CSV_PATH ?? path.join(__dirname, "tohsamples/chargers.csv");
+const connectorsPath =
+  process.env.CONNECTORS_PATH ?? path.join(__dirname, "tohsamples/connectors.csv");
 const activeOnly = (process.env.ACTIVE_ONLY ?? "true") !== "false";
 
 function parseCSV(filePath: string): Record<string, string>[] {
@@ -27,7 +32,18 @@ function parseCSV(filePath: string): Record<string, string>[] {
   });
 }
 
-function mapStatus(csvStatus: string): string {
+type OcppConnectorStatus =
+  | "Available"
+  | "Preparing"
+  | "Charging"
+  | "SuspendedEVSE"
+  | "SuspendedEV"
+  | "Finishing"
+  | "Reserved"
+  | "Unavailable"
+  | "Faulted";
+
+function mapChargerStatus(csvStatus: string): OcppConnectorStatus {
   switch (csvStatus) {
     case "ONLINE":
       return "Available";
@@ -42,11 +58,57 @@ function mapStatus(csvStatus: string): string {
   }
 }
 
+function mapConnectorStatus(csvStatus: string): OcppConnectorStatus {
+  switch (csvStatus) {
+    case "AVAILABLE":
+      return "Available";
+    case "UNAVAILABLE":
+      return "Unavailable";
+    case "CHARGING":
+      return "Charging";
+    case "FAULTED":
+      return "Faulted";
+    case "RESERVED":
+      return "Reserved";
+    default:
+      return "Available";
+  }
+}
+
+// Build a lookup: charger_id → sorted list of { connectorId, status }
+function buildConnectorMap(
+  filePath: string,
+): Map<string, Array<{ connectorId: number; status: OcppConnectorStatus }>> {
+  const map = new Map<string, Array<{ connectorId: number; status: OcppConnectorStatus }>>();
+  if (!fs.existsSync(filePath)) return map;
+  const rows = parseCSV(filePath);
+  for (const row of rows) {
+    if (row.is_active === "false") continue;
+    const chargerId = row.charger_id;
+    if (!chargerId) continue;
+    if (!map.has(chargerId)) map.set(chargerId, []);
+    map.get(chargerId)!.push({
+      connectorId: Number.parseInt(row.connector_id),
+      status: mapConnectorStatus(row.status),
+    });
+  }
+  // sort by connector_id ascending
+  for (const connectors of map.values()) {
+    connectors.sort((a, b) => a.connectorId - b.connectorId);
+  }
+  return map;
+}
+
 (async () => {
   const chargers = parseCSV(csvPath);
   const filtered = activeOnly ? chargers.filter((c) => c.is_active === "true") : chargers;
+  const connectorMap = buildConnectorMap(connectorsPath);
 
+  const hasConnectors = connectorMap.size > 0;
   console.log(`Loaded ${filtered.length} chargers from ${csvPath}`);
+  if (hasConnectors) {
+    console.log(`Loaded connector data from ${connectorsPath}`);
+  }
 
   for (const charger of filtered) {
     const ocppIdentity = charger.ocpp_identity;
@@ -67,13 +129,29 @@ function mapStatus(csvStatus: string): string {
           firmwareVersion: charger.firmware_version || "1.0.0",
         }),
       );
-      vcp.send(
-        statusNotificationOcppMessage.request({
-          connectorId: 1,
-          errorCode: "NoError",
-          status: mapStatus(charger.status),
-        }),
-      );
+
+      const connectors = connectorMap.get(charger.id);
+      if (connectors && connectors.length > 0) {
+        // Send StatusNotification for each connector from connectors CSV
+        for (const connector of connectors) {
+          vcp.send(
+            statusNotificationOcppMessage.request({
+              connectorId: connector.connectorId,
+              errorCode: "NoError",
+              status: connector.status,
+            }),
+          );
+        }
+      } else {
+        // Fallback: single connector derived from charger status
+        vcp.send(
+          statusNotificationOcppMessage.request({
+            connectorId: 1,
+            errorCode: "NoError",
+            status: mapChargerStatus(charger.status),
+          }),
+        );
+      }
     });
 
     await new Promise((r) => setTimeout(r, 100));
