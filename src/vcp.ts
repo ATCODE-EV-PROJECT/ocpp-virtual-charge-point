@@ -29,6 +29,9 @@ interface VCPOptions {
   chargePointId: string;
   basicAuthPassword?: string;
   adminPort?: number;
+  reconnect?: boolean;
+  reconnectBaseDelayMs?: number;
+  reconnectMaxDelayMs?: number;
 }
 
 interface LogEntry {
@@ -44,6 +47,9 @@ export class VCP {
   private messageHandler: OcppMessageHandler;
 
   private isFinishing = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private onReconnect?: () => void;
 
   transactionManager = new TransactionManager();
 
@@ -106,6 +112,15 @@ export class VCP {
       // Read current VCP config
       adminApi.get("/config", (c) => {
         return c.json({ targetSoc: this.targetSoc });
+      });
+
+      // Force-drop the WebSocket connection (VCP will auto-reconnect if enabled)
+      adminApi.post("/disconnect", (c) => {
+        if (this.ws) {
+          logger.info("Forced disconnect via admin API");
+          this.ws.terminate();
+        }
+        return c.text("OK");
       });
 
       serve({
@@ -205,6 +220,15 @@ export class VCP {
     }, interval);
   }
 
+  /**
+   * Register a callback invoked after every successful reconnect.
+   * Use it to re-send BootNotification + StatusNotification, exactly like
+   * the initial connect flow in your entry point.
+   */
+  setOnReconnect(fn: () => void) {
+    this.onReconnect = fn;
+  }
+
   close() {
     if (!this.ws) {
       throw new Error(
@@ -212,6 +236,10 @@ export class VCP {
       );
     }
     this.isFinishing = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
     this.ws.close();
     this.ws = undefined;
     process.exit(1);
@@ -304,6 +332,31 @@ export class VCP {
       return;
     }
     logger.info(`Connection closed. code=${code}, reason=${reason}`);
-    process.exit();
+
+    if (!this.vcpOptions.reconnect) {
+      process.exit();
+    }
+
+    const baseDelay = this.vcpOptions.reconnectBaseDelayMs ?? 2000;
+    const maxDelay = this.vcpOptions.reconnectMaxDelayMs ?? 60000;
+    // exponential backoff with jitter: delay = min(base * 2^attempt, max) ± 20%
+    const exp = Math.min(baseDelay * 2 ** this.reconnectAttempt, maxDelay);
+    const jitter = exp * 0.2 * (Math.random() * 2 - 1);
+    const delay = Math.round(exp + jitter);
+    this.reconnectAttempt += 1;
+
+    logger.info(
+      `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})...`,
+    );
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.connect();
+        this.reconnectAttempt = 0;
+        logger.info("Reconnected successfully");
+        this.onReconnect?.();
+      } catch (err) {
+        logger.error(`Reconnect failed: ${err}`);
+      }
+    }, delay);
   }
 }

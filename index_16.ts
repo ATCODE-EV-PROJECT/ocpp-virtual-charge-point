@@ -11,10 +11,10 @@ const vcp = new VCP({
   ocppVersion: OcppVersion.OCPP_1_6,
   basicAuthPassword: process.env.PASSWORD ?? undefined,
   adminPort: Number.parseInt(process.env.ADMIN_PORT ?? "9999"),
+  reconnect: true,
 });
 
-(async () => {
-  await vcp.connect();
+function announce() {
   vcp.send(
     bootNotificationOcppMessage.request({
       chargePointVendor: "Solidstudio",
@@ -30,4 +30,11 @@ const vcp = new VCP({
       status: "Available",
     }),
   );
+}
+
+vcp.setOnReconnect(announce);
+
+(async () => {
+  await vcp.connect();
+  announce();
 })();

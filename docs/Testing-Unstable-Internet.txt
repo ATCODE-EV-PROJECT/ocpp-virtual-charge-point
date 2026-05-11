@@ -1,0 +1,55 @@
+---
+  Testing unstable internet
+
+  1. The VCP now auto-reconnects
+
+  Both index_16.ts and index_16_from_csv.ts have reconnect: true. When the WebSocket drops (whether
+  from real network loss or a forced disconnect), the VCP will:
+  - Reconnect with exponential backoff (starts at 2s, doubles each attempt, caps at 60s, ±20% jitter)
+  - Re-send BootNotification + StatusNotification automatically after reconnecting
+
+  2. Trigger a disconnect on demand via admin API
+
+  # Drop the connection (VCP reconnects automatically)
+  curl -X POST http://localhost:9999/disconnect
+
+  Use this to simulate a charger losing connectivity mid-session.
+
+  3. Simulate flapping (repeated connect/disconnect)
+
+  # Drop every 10 seconds, 5 times
+  for i in {1..5}; do
+    curl -X POST http://localhost:9999/disconnect
+    sleep 10
+  done
+
+  4. OS-level network simulation (more realistic)
+
+  For true packet loss/latency, use Toxiproxy:
+  # Install
+  brew install toxiproxy
+
+  # Start proxy between VCP and CSMS
+  toxiproxy-server &
+  toxiproxy-cli create ocpp --listen 0.0.0.0:3001 --upstream localhost:3000
+
+  # Add latency (500ms ± 100ms)
+  toxiproxy-cli toxic add ocpp -t latency -a latency=500 -a jitter=100
+
+  # Add packet loss (30%)
+  toxiproxy-cli toxic add ocpp -t bandwidth -a rate=0
+
+  # Then start VCP pointing at the proxy port
+  WS_URL=ws://localhost:3001 npm start index_16.ts
+
+  Options you can tune via env vars
+
+  ┌──────────────────────┬──────────────────────────┬────────────────────────────────────────┐
+  │         Var          │         Default          │                Meaning                 │
+  ├──────────────────────┼──────────────────────────┼────────────────────────────────────────┤
+  │ RECONNECT            │ true in the entry points │ Set to false to disable auto-reconnect │
+  ├──────────────────────┼──────────────────────────┼────────────────────────────────────────┤
+  │ reconnectBaseDelayMs │ 2000ms                   │ Starting delay                         │
+  ├──────────────────────┼──────────────────────────┼────────────────────────────────────────┤
+  │ reconnectMaxDelayMs  │ 60000ms                  │ Max delay cap                          │
+  └──────────────────────┴──────────────────────────┴────────────────────────────────────────┘

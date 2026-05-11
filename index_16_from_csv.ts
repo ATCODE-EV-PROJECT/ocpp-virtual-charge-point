@@ -119,9 +119,12 @@ function buildConnectorMap(
       chargePointId: ocppIdentity,
       ocppVersion: OcppVersion.OCPP_1_6,
       basicAuthPassword: process.env.PASSWORD ?? undefined,
+      reconnect: true,
     });
 
-    vcp.connect().then(() => {
+    const connectors = connectorMap.get(charger.id);
+
+    function announce() {
       vcp.send(
         bootNotificationOcppMessage.request({
           chargePointVendor: "PandaEV",
@@ -130,9 +133,7 @@ function buildConnectorMap(
         }),
       );
 
-      const connectors = connectorMap.get(charger.id);
       if (connectors && connectors.length > 0) {
-        // Send StatusNotification for each connector from connectors CSV
         for (const connector of connectors) {
           vcp.send(
             statusNotificationOcppMessage.request({
@@ -143,7 +144,6 @@ function buildConnectorMap(
           );
         }
       } else {
-        // Fallback: single connector derived from charger status
         vcp.send(
           statusNotificationOcppMessage.request({
             connectorId: 1,
@@ -152,7 +152,10 @@ function buildConnectorMap(
           }),
         );
       }
-    });
+    }
+
+    vcp.setOnReconnect(announce);
+    vcp.connect().then(announce);
 
     await new Promise((r) => setTimeout(r, 100));
   }
