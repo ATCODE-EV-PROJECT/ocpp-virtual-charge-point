@@ -18,75 +18,263 @@ npm install
 
 ## Running VCP
 
-Configure env variables:
+Configure env variables in `.env`:
 
 ```
-WS_URL - websocket endpoint
-CP_ID - ID of this VCP
-PASSWORD - if used for OCPP Authentication, otherwise can be left blank
+WS_URL=ws://localhost:4002        # WebSocket endpoint of the OCPP CSMS
+CP_ID=123456                      # Charge point identity registered in the system
+PASSWORD=                         # Basic-auth password (leave blank if unused)
+ADMIN_PORT=9999                   # Admin HTTP API port (default: 9999)
+TARGET_SOC=100                    # Auto-stop SoC % (default: 100)
 ```
 
-Run OCPP 1.6:
+When testing different configurations, create multiple `.env` files and pass the suffix as an argument:
 
 ```bash
+npm start index_16.ts             # uses .env
+npm start production index_16.ts  # uses .env.production
+npm start .env.staging index_16.ts
+```
+
+### Entry points
+
+| Command | Description |
+|---|---|
+| `npm start index_16.ts` | OCPP 1.6 — single connector |
+| `npm start index_16_2_connectors.ts` | OCPP 1.6 — two connectors |
+| `npm start index_16_stress.ts` | OCPP 1.6 — stress test (many sessions) |
+| `npm start index_16_from_csv.ts` | OCPP 1.6 — sessions driven from CSV |
+| `npm start index_201.ts` | OCPP 2.0.1 |
+| `npm start index_21.ts` | OCPP 2.1 |
+
+---
+
+## Testing Commands (OCPP 1.6)
+
+All admin commands require the VCP to be running. Run them in a separate terminal.
+
+### Transaction flow
+
+```bash
+# Start a transaction (connector 1, idTag MOBILE_APP, meterStart 0 Wh)
+npx tsx admin/v16/Transaction/startTransaction.ts
+
+# Override connector, meter start, or idTag
+CONNECTOR_ID=2 METER_START=5000 ID_TAG=RFID_CARD npx tsx admin/v16/Transaction/startTransaction.ts
+
+# Send meter values mid-session (3 kWh delivered, 22 kW instantaneous)
+npx tsx admin/v16/Transaction/meterValues.ts
+
+# Override transaction id and meter reading
+TRANSACTION_ID=42 METER_WH=6000 POWER_KW=11 npx tsx admin/v16/Transaction/meterValues.ts
+
+# Stop a transaction (transactionId=1, meterStop=15000 Wh = 15 kWh)
+npx tsx admin/v16/Transaction/stopTransaction.ts
+
+# Override transaction id and final meter reading
+TRANSACTION_ID=42 METER_STOP=20000 npx tsx admin/v16/Transaction/stopTransaction.ts
+
+# Start a transaction on a reserved connector
+npx tsx admin/v16/Transaction/startTransaction-reserved.ts
+```
+
+### Connector status
+
+```bash
+npx tsx admin/v16/StatusNotification/available.ts    # connector ready
+npx tsx admin/v16/StatusNotification/preparing.ts    # cable plugged, waiting auth
+npx tsx admin/v16/StatusNotification/charging.ts     # actively charging
+npx tsx admin/v16/StatusNotification/suspendedEV.ts  # car paused charging (full/paused)
+npx tsx admin/v16/StatusNotification/suspendedEVSE.ts
+npx tsx admin/v16/StatusNotification/finishing.ts    # transaction ended, cable still in
+npx tsx admin/v16/StatusNotification/reserved.ts
+npx tsx admin/v16/StatusNotification/faulted.ts
+npx tsx admin/v16/StatusNotification/unavailable.ts
+npx tsx admin/v16/StatusNotification/second.ts       # connector 2 status
+```
+
+### Authorization
+
+```bash
+npx tsx admin/v16/Authorize/authorize.ts              # known idTag → Accepted
+npx tsx admin/v16/Authorize/authorize-non-existing.ts # unknown idTag → Invalid
+```
+
+### Other messages
+
+```bash
+npx tsx admin/v16/DataTransfer/dataTransfer.ts
+npx tsx admin/v16/Firmware/firmware-status-notification.ts
+```
+
+---
+
+## Common Test Scenarios
+
+### Normal charging session
+
+```bash
+# 1. Start VCP
 npm start index_16.ts
+
+# 2. Trigger a session from the mobile app (QR scan or remote start)
+
+# 3. Send meter values while charging
+npx tsx admin/v16/Transaction/meterValues.ts
+
+# 4. Stop the transaction
+npx tsx admin/v16/Transaction/stopTransaction.ts
+
+# 5. Return connector to Available
+npx tsx admin/v16/StatusNotification/available.ts
 ```
 
-Run OCPP 2.0.1:
+### Parking overstay fee
+
+This tests the parking fee that accrues when a car stays plugged in after charging ends.
+Requires `enable_parking_fee = true` in the station's pricing tier.
 
 ```bash
-npm start index_201.ts
+# 1. Complete a charging session (steps above through stopTransaction)
+
+# 2. Put connector in Finishing (cable still plugged — parking timer starts)
+npx tsx admin/v16/StatusNotification/finishing.ts
+
+# 3. Wait for parkingFreeMinutes to elapse (set to 1 in pricing tier for fast testing)
+#    The parking monitor cron fires every minute and sends push notifications.
+
+# 4. Simulate car going idle while still plugged (optional — triggers SSE idle warning)
+npx tsx admin/v16/StatusNotification/suspendedEV.ts
+
+# 5. Simulate physical unplug — this triggers immediate billing
+npx tsx admin/v16/StatusNotification/available.ts
+#    → wallet deducted: billableMinutes × parkingFeePerMinute LAK
+#    → chargingSession.overstayMinutes / overstayFee updated in DB
 ```
 
-When testing different configurations, you can create multiple `.env` files and pass the env file or the env file suffix as an argument, for example:
+### Unplug fee (cable removed before charging)
 
 ```bash
-# uses .env
-npm start .env index_16.ts
-# uses .env if exists
-npm start index_16.ts
-# uses .env.production
-npm start .env.production index_16.ts
-# uses .env.production
-npm start production index_16.ts
+# Plug in and immediately unplug within the grace window configured in pricing
+npx tsx admin/v16/StatusNotification/preparing.ts
+npx tsx admin/v16/StatusNotification/available.ts
 ```
 
-
-## Example
+### Two-connector charger
 
 ```bash
-> WS_URL=ws://localhost:3000 CP_ID=vcp_16_test npm start index_16.ts
+# Start VCP with two connectors
+npm start index_16_2_connectors.ts
+
+# Send status for connector 2
+npx tsx admin/v16/StatusNotification/second.ts
+
+# Start transaction on connector 2
+CONNECTOR_ID=2 npx tsx admin/v16/Transaction/startTransaction.ts
+```
+
+### Reserved connector
+
+```bash
+# Reserve connector via Admin API, then simulate the EV arriving
+npx tsx admin/v16/StatusNotification/reserved.ts
+npx tsx admin/v16/Transaction/startTransaction-reserved.ts
+```
+
+### Faulted / Unavailable
+
+```bash
+# Simulate a hardware fault
+npx tsx admin/v16/StatusNotification/faulted.ts
+
+# Take charger offline for maintenance
+npx tsx admin/v16/StatusNotification/unavailable.ts
+
+# Restore
+npx tsx admin/v16/StatusNotification/available.ts
+```
+
+### Lost internet / unstable connection
+
+`index_16.ts` and `index_16_from_csv.ts` have `reconnect: true` by default. When the WebSocket drops the VCP will reconnect with exponential backoff (starts at 2 s, doubles each attempt, caps at 60 s, ±20% jitter) and re-announce with `BootNotification` + `StatusNotification` automatically.
+
+**Drop the connection on demand**
+
+```bash
+# Force-disconnect — VCP reconnects automatically
+curl -X POST http://localhost:9999/disconnect
+```
+
+Use this to simulate a charger losing connectivity mid-session and verify the CSMS's 3-minute grace period behaviour.
+
+**Simulate repeated flapping**
+
+```bash
+# Drop every 10 seconds, 5 times
+for i in {1..5}; do
+  curl -X POST http://localhost:9999/disconnect
+  sleep 10
+done
+```
+
+**OS-level network simulation with Toxiproxy (most realistic)**
+
+```bash
+# Install
+brew install toxiproxy
+
+# Start the proxy server
+toxiproxy-server &
+
+# Create a proxy in front of the CSMS (adjust ports to match your setup)
+toxiproxy-cli create ocpp --listen 0.0.0.0:3001 --upstream localhost:4002
+
+# Point VCP at the proxy instead of the CSMS directly
+WS_URL=ws://localhost:3001 npm start index_16.ts
+
+# --- Inject faults ---
+
+# Add 500 ms latency ± 100 ms
+toxiproxy-cli toxic add ocpp -t latency -a latency=500 -a jitter=100
+
+# Simulate total packet loss (rate=0 = bandwidth 0 KB/s)
+toxiproxy-cli toxic add ocpp -t bandwidth -a rate=0
+
+# Remove all toxics (restore normal connection)
+toxiproxy-cli toxic remove ocpp --toxicName latency_downstream
+toxiproxy-cli toxic remove ocpp --toxicName bandwidth_downstream
+```
+
+**Env vars that control reconnect behaviour**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RECONNECT` | `true` (in entry points) | Set to `false` to disable auto-reconnect |
+| `reconnectBaseDelayMs` | `2000` ms | Starting backoff delay |
+| `reconnectMaxDelayMs` | `60000` ms | Maximum backoff cap |
+
+**What to verify on the CSMS side**
+
+- Session stays `ACTIVE` during the 3-minute offline grace period
+- `StopTransaction` arriving after reconnect completes the session normally
+- If the grace period expires without `StopTransaction`, session is marked `FAILED` and the charger lock is released
+
+---
+
+## Example startup output
+
+```
+> WS_URL=ws://localhost:4002 CP_ID=vcp_16_test npm start index_16.ts
 
 2023-03-27 13:09:17 info: Connecting... | {
-  endpoint: 'ws://localhost:3000',
+  endpoint: 'ws://localhost:4002',
   chargePointId: 'vcp_16_test',
   ocppVersion: 'OCPP_1.6',
-  basicAuthPassword: 'password',
   adminWsPort: 9999
 }
-2023-03-27 13:09:17 info: Sending message ➡️  [2,"5fe44756-05e1-4065-9c91-11b456b55913","BootNotification",{"chargePointVendor":"Solidstudio","chargePointModel":"test","chargePointSerialNumber":"S001","firmwareVersion":"1.0.0"}]
-2023-03-27 13:09:17 info: Sending message ➡️  [2,"aad8d05d-3a6b-4c51-a9fc-7275d4a6cbc3","StatusNotification",{"connectorId":1,"errorCode":"NoError","status":"Available"}]
-2023-03-27 13:09:17 info: Receive message ⬅️  [3,"5fe44756-05e1-4065-9c91-11b456b55913",{"currentTime":"2023-03-27T11:09:17.883Z","interval":30,"status":"Accepted"}]
-2023-03-27 13:09:17 info: Receive message ⬅️  [2,"658c8f5b-9f86-487f-91f8-1d656453978a","ChangeConfiguration",{"key":"MeterValueSampleInterval","value":"60"}]
-2023-03-27 13:09:17 info: Responding with ➡️  [3,"658c8f5b-9f86-487f-91f8-1d656453978a",{"status":"Accepted"}]
-2023-03-27 13:09:17 info: Receive message ⬅️  [2,"34fc4673-deff-48d3-bb8e-d94d75fa619a","GetConfiguration",{"key":["SupportedFeatureProfiles"]}]
-2023-03-27 13:09:17 info: Responding with ➡️  [3,"34fc4673-deff-48d3-bb8e-d94d75fa619a",{"configurationKey":[{"key":"SupportedFeatureProfiles","readonly":true,"value":"Core,FirmwareManagement,LocalAuthListManagement,Reservation,SmartCharging,RemoteTrigger"},{"key":"ChargeProfileMaxStackLevel","readonly":true,"value":"99"},{"key":"HeartbeatInterval","readonly":false,"value":"300"},{"key":"GetConfigurationMaxKeys","readonly":true,"value":"99"}]}]
-2023-03-27 13:09:17 info: Receive message ⬅️  [3,"aad8d05d-3a6b-4c51-a9fc-7275d4a6cbc3",{}]
-2023-03-27 13:09:18 info: Receive message ⬅️  [2,"d7610ad2-63d0-470f-9bd9-6e47d5483429","SetChargingProfile",{"connectorId":0,"csChargingProfiles":{"chargingProfileId":30,"stackLevel":0,"chargingProfilePurpose":"ChargePointMaxProfile","chargingProfileKind":"Absolute","chargingSchedule":{"chargingRateUnit":"A","chargingSchedulePeriod":[{"startPeriod":0,"limit":10.0}]}}}]
-2023-03-27 13:09:18 info: Responding with ➡️  [3,"d7610ad2-63d0-470f-9bd9-6e47d5483429",{"status":"Accepted"}]
-2023-03-27 13:10:17 info: Sending message ➡️  [2,"79a41b2e-2c4a-4a65-9d7e-417967a8f95f","Heartbeat",{}]
-2023-03-27 13:10:17 info: Receive message ⬅️  [3,"79a41b2e-2c4a-4a65-9d7e-417967a8f95f",{"currentTime":"2023-03-27T11:10:17.955Z"}]
-```
-
-## Executing Admin Commands
-
-Some messages are automatically sent by the VCP, for example, `BootNotification` or `StartTransaction` and `StopTransaction`.
-However, for Operations initiated by Charge Point (compare e.g. with OCPP 1.6, Chapter 4) one can send the messages using `admin` functionality.
-VCP exposes a separate Websocket endpoint that will "proxy" all messages to Central System Websocket.
-For example usage, see `admin/` folder.
-
-```bash
-npx tsx admin/v16/Authorize/authorize.ts
+2023-03-27 13:09:17 info: Sending ➡️  BootNotification
+2023-03-27 13:09:17 info: Sending ➡️  StatusNotification { status: Available }
+2023-03-27 13:09:17 info: Receive ⬅️  BootNotification response { status: Accepted }
 ```
 
 ---
@@ -99,7 +287,7 @@ Please use the [issue tracker](https://github.com/solidstudiosh/ocpp-virtual-cha
 
 ### Developing
 
-We encourage contributions through pull requests and follow the standard "fork-and-pull" git workflow. Feel free to create a fork of the repository, make your changes, and submit a pull request for review. We appreciate your contributions!
+We encourage contributions through pull requests and follow the standard "fork-and-pull" git workflow.
 
 1. Fork the repository on GitHub.
 2. Clone the forked repository to your local machine.
