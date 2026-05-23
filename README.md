@@ -196,68 +196,172 @@ npx tsx admin/v16/StatusNotification/available.ts
 
 ### Lost internet / unstable connection
 
-`index_16.ts` and `index_16_from_csv.ts` have `reconnect: true` by default. When the WebSocket drops the VCP will reconnect with exponential backoff (starts at 2 s, doubles each attempt, caps at 60 s, ±20% jitter) and re-announce with `BootNotification` + `StatusNotification` automatically.
+The VCP has built-in reconnect support. `index_16.ts` and `index_16_from_csv.ts` both set `reconnect: true`. When the WebSocket drops for any reason, the VCP will:
 
-**Drop the connection on demand**
+- Reconnect with **exponential backoff** (starts at 2 s, doubles each attempt, caps at 60 s, ±20% jitter)
+- Re-send `BootNotification` + `StatusNotification` automatically after every successful reconnect
+
+There are two ways to trigger a disconnect: a lightweight **admin API call** for quick checks, and the **Toxiproxy script** for realistic OS-level network simulation.
+
+---
+
+#### Option A — Quick disconnect via admin API
 
 ```bash
-# Force-disconnect — VCP reconnects automatically
+# Force-drop the WebSocket — VCP reconnects automatically
 curl -X POST http://localhost:9999/disconnect
 ```
 
-Use this to simulate a charger losing connectivity mid-session and verify the CSMS's 3-minute grace period behaviour.
-
-**Simulate repeated flapping**
+Use this to verify the CSMS grace-period behaviour without extra tooling.
 
 ```bash
-# Drop every 10 seconds, 5 times
+# Repeated flapping — drop every 10 s, 5 times
 for i in {1..5}; do
   curl -X POST http://localhost:9999/disconnect
   sleep 10
 done
 ```
 
-**OS-level network simulation with Toxiproxy (most realistic)**
+---
 
-```bash
-# Install
-brew install toxiproxy
+#### Option B — Realistic network simulation with `test-unstable-net.sh`
 
-# Start the proxy server
-toxiproxy-server &
+`test-unstable-net.sh` wraps [Toxiproxy](https://github.com/Shopify/toxiproxy) to inject real OS-level network faults between the VCP and the CSMS. It starts `toxiproxy-server` automatically, creates the proxy on first run, and handles all toxic lifecycle management.
 
-# Create a proxy in front of the CSMS (adjust ports to match your setup)
-toxiproxy-cli create ocpp --listen 0.0.0.0:3001 --upstream localhost:4002
-
-# Point VCP at the proxy instead of the CSMS directly
-WS_URL=ws://localhost:3001 npm start index_16.ts
-
-# --- Inject faults ---
-
-# Add 500 ms latency ± 100 ms
-toxiproxy-cli toxic add ocpp -t latency -a latency=500 -a jitter=100
-
-# Simulate total packet loss (rate=0 = bandwidth 0 KB/s)
-toxiproxy-cli toxic add ocpp -t bandwidth -a rate=0
-
-# Remove all toxics (restore normal connection)
-toxiproxy-cli toxic remove ocpp --toxicName latency_downstream
-toxiproxy-cli toxic remove ocpp --toxicName bandwidth_downstream
+```
+VCP (index_16.ts)
+      │  ws://localhost:3001
+      ▼
+[Toxiproxy :3001]  ← faults injected here
+      │  ws://localhost:4002
+      ▼
+CSMS (panda-ev-ocpp)
 ```
 
-**Env vars that control reconnect behaviour**
+**Prerequisites (one-time install)**
+
+```bash
+brew install toxiproxy
+```
+
+**Step 1 — Start the VCP via the proxy**
+
+```bash
+# Terminal 1
+WS_URL=ws://localhost:3001 npm start index_16.ts
+```
+
+The script auto-creates the proxy `ocpp` (`:3001 → localhost:4002`) on first use.
+
+**Step 2 — Inject a fault**
+
+```bash
+# Terminal 2 — pick any scenario
+./test-unstable-net.sh latency   # add 500 ms delay ± 100 ms jitter
+./test-unstable-net.sh slow      # throttle bandwidth to 10 KB/s
+./test-unstable-net.sh drop      # freeze connection for 10 s, then auto-restore
+./test-unstable-net.sh flap      # 5 cycles of freeze / restore (fully automated)
+./test-unstable-net.sh loss      # silent packet loss (timeout toxic, 3 s)
+```
+
+**Step 3 — Check what is active**
+
+```bash
+./test-unstable-net.sh status
+```
+
+Output shows the proxy table with the active toxic count:
+```
+Proxies:
+ocpp    [::]:3001    localhost:4002    enabled    1
+```
+
+**Step 4 — Remove all faults**
+
+```bash
+./test-unstable-net.sh clean
+```
+
+**Step 5 — Teardown when done**
+
+```bash
+./test-unstable-net.sh teardown   # deletes proxy + stops toxiproxy-server
+```
+
+---
+
+**Scenario reference**
+
+| Scenario | What it does | Auto-restores? |
+|---|---|---|
+| `latency` | Adds a fixed delay + jitter to every frame | No — run `clean` |
+| `slow` | Caps throughput at N KB/s | No — run `clean` |
+| `drop` | Freezes the connection entirely for N seconds, then removes itself | **Yes** |
+| `flap` | Runs N automated cycles of freeze → restore | **Yes** |
+| `loss` | Closes the connection after N ms of silence (dead-path simulation) | No — run `clean` |
+| `clean` | Removes all active toxics immediately | — |
+| `status` | Prints proxy table and active toxic count | — |
+| `teardown` | Deletes the proxy and stops `toxiproxy-server` | — |
+
+---
+
+**Tuning via environment variables**
+
+All defaults can be overridden inline:
+
+```bash
+# Heavier latency
+LATENCY_MS=1000 JITTER_MS=300 ./test-unstable-net.sh latency
+
+# Very slow link
+BANDWIDTH_KB=1 ./test-unstable-net.sh slow
+
+# Long drop — test the CSMS 3-minute grace period
+DROP_SECS=200 ./test-unstable-net.sh drop
+
+# Aggressive flap — 10 short cycles
+FLAP_COUNT=10 FLAP_DOWN_SECS=3 FLAP_UP_SECS=2 ./test-unstable-net.sh flap
+
+# Tighter packet-loss timeout
+LOSS_TIMEOUT=1000 ./test-unstable-net.sh loss
+
+# Different CSMS or proxy port
+CSMS_PORT=3000 PROXY_PORT=4000 ./test-unstable-net.sh status
+```
+
+Full variable reference:
+
+| Variable | Default | Applies to |
+|---|---|---|
+| `CSMS_PORT` | `4002` | all |
+| `PROXY_PORT` | `3001` | all |
+| `LATENCY_MS` | `500` | `latency` |
+| `JITTER_MS` | `100` | `latency` |
+| `BANDWIDTH_KB` | `10` | `slow` |
+| `DROP_SECS` | `10` | `drop` |
+| `FLAP_COUNT` | `5` | `flap` |
+| `FLAP_DOWN_SECS` | `8` | `flap` |
+| `FLAP_UP_SECS` | `5` | `flap` |
+| `LOSS_TIMEOUT` | `3000` | `loss` |
+
+---
+
+**VCP reconnect behaviour**
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RECONNECT` | `true` (in entry points) | Set to `false` to disable auto-reconnect |
-| `reconnectBaseDelayMs` | `2000` ms | Starting backoff delay |
+| `reconnect` | `true` (set in each entry point) | Set to `false` to disable auto-reconnect |
+| `reconnectBaseDelayMs` | `2000` ms | Initial backoff delay |
 | `reconnectMaxDelayMs` | `60000` ms | Maximum backoff cap |
+
+---
 
 **What to verify on the CSMS side**
 
-- Session stays `ACTIVE` during the 3-minute offline grace period
-- `StopTransaction` arriving after reconnect completes the session normally
-- If the grace period expires without `StopTransaction`, session is marked `FAILED` and the charger lock is released
+- Session stays `ACTIVE` during the offline grace period (3 minutes by default)
+- `StopTransaction` arriving after reconnect closes the session normally
+- If the grace period expires without `StopTransaction`, the session is marked `FAILED` and the charger lock is released
+- `BootNotification` + `StatusNotification` are re-sent after every reconnect and accepted without creating duplicate records
 
 ---
 
