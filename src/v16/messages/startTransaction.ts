@@ -4,6 +4,7 @@ import {
   type OcppCallResult,
   OcppOutgoing,
 } from "../../ocppMessage";
+import { vcpTimestamp } from "../../utils";
 import type { VCP } from "../../vcp";
 import { ConnectorIdSchema, IdTagInfoSchema, IdTokenSchema } from "./_common";
 import { meterValuesOcppMessage } from "./meterValues";
@@ -54,7 +55,7 @@ class StartTransactionOcppMessage extends OcppOutgoing<
             transactionId: result.payload.transactionId,
             meterValue: [
               {
-                timestamp: new Date().toISOString(),
+                timestamp: vcpTimestamp(),
                 sampledValue: [
                   {
                     value: (transactionState.meterValue / 1000).toString(),
@@ -104,7 +105,7 @@ class StartTransactionOcppMessage extends OcppOutgoing<
               transactionId: result.payload.transactionId,
               meterStop: Math.round(transactionState.meterValue),
               reason: "EVDisconnected",
-              timestamp: new Date().toISOString(),
+              timestamp: vcpTimestamp(),
             }),
           );
           // SuspendedEV — cable is still plugged in after battery full
@@ -134,7 +135,7 @@ class StartTransactionOcppMessage extends OcppOutgoing<
           transactionId: result.payload.transactionId,
           meterStop: 0,
           reason: "DeAuthorized",
-          timestamp: new Date().toISOString(),
+          timestamp: vcpTimestamp(),
         }),
       );
       vcp.send(

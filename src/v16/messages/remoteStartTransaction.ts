@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { type OcppCall, OcppIncoming } from "../../ocppMessage";
+import { vcpTimestamp } from "../../utils";
 import type { VCP } from "../../vcp";
 import {
   ChargingProfileSchema,
@@ -45,7 +46,7 @@ class RemoteStartTransactionOcppMessage extends OcppIncoming<
         connectorId: call.payload.connectorId,
         idTag: call.payload.idTag,
         meterStart: 0,
-        timestamp: new Date().toISOString(),
+        timestamp: vcpTimestamp(),
       }),
     );
     vcp.send(

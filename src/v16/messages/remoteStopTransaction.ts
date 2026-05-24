@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { generateOCMF, getOCMFPublicKey } from "../../ocmfGenerator";
 import { type OcppCall, OcppIncoming } from "../../ocppMessage";
+import { vcpTimestamp } from "../../utils";
 import type { VCP } from "../../vcp";
 import { statusNotificationOcppMessage } from "./statusNotification";
 import { stopTransactionOcppMessage } from "./stopTransaction";
@@ -52,10 +53,10 @@ class RemoteStopTransactionOcppMessage extends OcppIncoming<
       stopTransactionOcppMessage.request({
         transactionId: transactionId,
         meterStop,
-        timestamp: new Date().toISOString(),
+        timestamp: vcpTimestamp(),
         transactionData: [
           {
-            timestamp: new Date().toISOString(),
+            timestamp: vcpTimestamp(),
             sampledValue: [
               {
                 value: JSON.stringify({

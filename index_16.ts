@@ -14,6 +14,11 @@ const vcp = new VCP({
   reconnect: true,
 });
 
+/**
+ * Full boot sequence — sent once on initial startup.
+ * BootNotification tells the CSMS the charger (re)booted its firmware.
+ * The CSMS will force-stop any open transactions on BootNotification.
+ */
 function announce() {
   vcp.send(
     bootNotificationOcppMessage.request({
@@ -32,7 +37,29 @@ function announce() {
   );
 }
 
-vcp.setOnReconnect(announce);
+/**
+ * WebSocket-reconnect announce — sent when the WS drops and auto-reconnects
+ * WITHOUT a firmware reboot (e.g. network blip, brief connectivity loss).
+ * Does NOT send BootNotification so the CSMS does NOT force-stop open sessions.
+ * The 90-second force-stop timer in the CSMS is already cancelled by the
+ * reconnect, so an active session will continue as-is.
+ *
+ * SCENARIO 10: use the admin POST /disconnect endpoint to simulate a brief
+ * WS drop — VCP auto-reconnects and only re-announces connector status.
+ * To simulate a full charger reboot (force-stop sessions), restart the
+ * VCP process (Ctrl-C + npm start), which sends a fresh BootNotification.
+ */
+function announceOnReconnect() {
+  vcp.send(
+    statusNotificationOcppMessage.request({
+      connectorId: 1,
+      errorCode: "NoError",
+      status: "Available",
+    }),
+  );
+}
+
+vcp.setOnReconnect(announceOnReconnect);
 
 (async () => {
   await vcp.connect();
