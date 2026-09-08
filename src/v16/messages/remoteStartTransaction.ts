@@ -14,6 +14,10 @@ const RemoteStartTransactionReqSchema = z.object({
   connectorId: ConnectorIdSchema.nullish(),
   idTag: IdTokenSchema,
   chargingProfile: ChargingProfileSchema.nullish(),
+  // Not part of OCPP 1.6J — Offline Charging V2 sends this as an extra field
+  // (see offline-panda-ev-ocpp/ocpp.gateway.ts sendRemoteStart). Declared here
+  // so schema validation doesn't warn on it; ignored by real chargers.
+  maxEnergyWh: z.number().int().positive().nullish(),
 });
 type RemoteStartTransactionReqType = typeof RemoteStartTransactionReqSchema;
 
@@ -41,6 +45,10 @@ class RemoteStartTransactionOcppMessage extends OcppIncoming<
       return;
     }
     vcp.respond(this.response(call, { status: "Accepted" }));
+    vcp.setPendingMaxEnergyWh(
+      call.payload.connectorId,
+      call.payload.maxEnergyWh ?? undefined,
+    );
     vcp.send(
       startTransactionOcppMessage.request({
         connectorId: call.payload.connectorId,

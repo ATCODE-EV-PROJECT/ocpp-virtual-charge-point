@@ -11,6 +11,8 @@ interface TransactionState {
   meterValue: number;
   evseId?: number;
   connectorId: number;
+  /** Offline Charging V2 local-control ceiling — see vcp.ts pendingMaxEnergyWh. */
+  maxEnergyWh?: number;
 }
 
 interface StartTransactionProps {
@@ -18,6 +20,7 @@ interface StartTransactionProps {
   idTag: string;
   evseId?: number;
   connectorId: number;
+  maxEnergyWh?: number;
   meterValuesCallback: (transactionState: TransactionState) => Promise<void>;
 }
 
@@ -53,6 +56,7 @@ export class TransactionManager {
       startedAt: new Date(),
       evseId: startTransactionProps.evseId,
       connectorId: startTransactionProps.connectorId,
+      maxEnergyWh: startTransactionProps.maxEnergyWh,
       meterValuesTimer: meterValuesTimer,
     });
   }

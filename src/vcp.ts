@@ -66,6 +66,28 @@ export class VCP {
     Math.max(1, Number.parseInt(process.env.TARGET_SOC ?? "100", 10) || 100),
   );
 
+  /**
+   * Offline Charging V2 — bridges `maxEnergyWh` from RemoteStartTransaction
+   * (a non-standard extra field the CSMS sends, see remoteStartTransaction.ts)
+   * to the StartTransaction resHandler that creates the TransactionManager
+   * entry, keyed by connectorId since that's all RemoteStartTransaction has
+   * to correlate with — the real transactionId doesn't exist yet at that point.
+   * Deliberately NOT sent back out over the wire on StartTransaction itself,
+   * to avoid polluting the real OCPP 1.6 payload with a non-spec field.
+   */
+  private pendingMaxEnergyWh: Map<number, number> = new Map();
+
+  setPendingMaxEnergyWh(connectorId: number, maxEnergyWh: number | undefined) {
+    if (maxEnergyWh === undefined) return;
+    this.pendingMaxEnergyWh.set(connectorId, maxEnergyWh);
+  }
+
+  consumePendingMaxEnergyWh(connectorId: number): number | undefined {
+    const value = this.pendingMaxEnergyWh.get(connectorId);
+    this.pendingMaxEnergyWh.delete(connectorId);
+    return value;
+  }
+
   constructor(private vcpOptions: VCPOptions) {
     this.messageHandler = resolveMessageHandler(vcpOptions.ocppVersion);
     if (vcpOptions.adminPort) {
