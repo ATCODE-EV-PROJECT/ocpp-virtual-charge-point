@@ -12,6 +12,14 @@ const vcp = new VCP({
   basicAuthPassword: process.env.PASSWORD ?? undefined,
   adminPort: Number.parseInt(process.env.ADMIN_PORT ?? "9999"),
   reconnect: true,
+  // Override to widen the reconnect gap for NOT_BOOTED reproduction testing
+  // (CSMS's offline-notify/bootedIdentities-preserve window is 15s).
+  reconnectBaseDelayMs: process.env.RECONNECT_BASE_DELAY_MS
+    ? Number.parseInt(process.env.RECONNECT_BASE_DELAY_MS)
+    : undefined,
+  reconnectMaxDelayMs: process.env.RECONNECT_MAX_DELAY_MS
+    ? Number.parseInt(process.env.RECONNECT_MAX_DELAY_MS)
+    : undefined,
 });
 
 /**
@@ -46,10 +54,17 @@ function announce() {
  *
  * SCENARIO 10: use the admin POST /disconnect endpoint to simulate a brief
  * WS drop — VCP auto-reconnects and only re-announces connector status.
- * To simulate a full charger reboot (force-stop sessions), restart the
- * VCP process (Ctrl-C + npm start), which sends a fresh BootNotification.
+ *
+ * Genuine reboot (Reset(Hard) from CSMS, or vcp.simulateReboot()) sets
+ * vcp.rebootPending — that case falls through to announce() below, sending
+ * a fresh BootNotification, same as restarting the VCP process would.
  */
 function announceOnReconnect() {
+  if (vcp.rebootPending) {
+    vcp.rebootPending = false;
+    announce();
+    return;
+  }
   vcp.send(
     statusNotificationOcppMessage.request({
       connectorId: 1,

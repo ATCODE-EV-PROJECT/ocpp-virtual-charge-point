@@ -21,7 +21,7 @@ class ResetOcppMessage extends OcppIncoming<ResetReqType, ResetResType> {
     vcp.respond(this.response(call, { status: "Accepted" }));
     if (call.payload.type === "Hard") {
       await delay(3_000);
-      vcp.close();
+      vcp.simulateReboot();
     }
   };
 }

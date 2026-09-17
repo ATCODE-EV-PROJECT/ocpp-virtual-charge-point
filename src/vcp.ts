@@ -51,6 +51,14 @@ export class VCP {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   private onReconnect?: () => void;
 
+  /**
+   * Set by a genuine-reboot simulation (e.g. Reset(Hard)) so the next
+   * onReconnect callback knows to re-announce a full boot sequence
+   * (BootNotification) instead of the lightweight reconnect-only announce.
+   * Consumed (reset to false) by the entry point's onReconnect callback.
+   */
+  rebootPending = false;
+
   transactionManager = new TransactionManager();
 
   /**
@@ -171,6 +179,12 @@ export class VCP {
       });
 
       this.ws.on("open", () => resolve());
+      // Without this listener, a connect-time failure (e.g. ECONNREFUSED
+      // during a reconnect attempt) is an unhandled 'error' event and
+      // crashes the process before the 'close' handler can retry.
+      this.ws.on("error", (err: Error) => {
+        logger.error(`WebSocket error: ${err.message}`);
+      });
       this.ws.on("message", (message: string) => this._onMessage(message));
       this.ws.on("ping", () => {
         logger.info("Received PING");
@@ -238,6 +252,10 @@ export class VCP {
 
   configureHeartbeat(interval: number) {
     setInterval(() => {
+      // The interval keeps running across disconnects/reconnects — skip a
+      // tick instead of throwing if it fires while the socket is mid-
+      // reconnect (not yet OPEN).
+      if (this.ws?.readyState !== WebSocket.OPEN) return;
       this.send(heartbeatOcppMessage.request({}));
     }, interval);
   }
@@ -265,6 +283,21 @@ export class VCP {
     this.ws.close();
     this.ws = undefined;
     process.exit(1);
+  }
+
+  /**
+   * Simulates a genuine charge-point reboot (e.g. triggered by Reset(Hard)):
+   * drops the WebSocket like a real reboot would, but — unlike close() —
+   * keeps the process alive and lets the existing reconnect/backoff logic
+   * bring the connection back up. Sets rebootPending so the onReconnect
+   * callback can re-send BootNotification instead of a reconnect-only
+   * announce, matching real hardware that resends BootNotification after an
+   * actual reboot but not after a plain network-blip reconnect.
+   */
+  simulateReboot() {
+    this.rebootPending = true;
+    logger.info("Simulating reboot (Reset Hard) — dropping WebSocket");
+    this.ws?.terminate();
   }
 
   async getDiagnosticData(): Promise<LogEntry[]> {
