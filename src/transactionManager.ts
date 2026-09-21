@@ -37,6 +37,14 @@ export class TransactionManager {
   }
 
   startTransaction(vcp: VCP, startTransactionProps: StartTransactionProps) {
+    // Guard against double-registration (e.g. a StartTransaction CallResult
+    // handled twice during unstable connectivity) — without this, the old
+    // interval leaks forever and keeps emitting stale MeterValues under the
+    // same transactionId after the real transaction has already stopped.
+    const existing = this.transactions.get(startTransactionProps.transactionId);
+    if (existing?.meterValuesTimer) {
+      clearInterval(existing.meterValuesTimer);
+    }
     const meterValuesTimer = setInterval(() => {
       // biome-ignore lint/style/noNonNullAssertion: transaction must exist
       const currentTransactionState = this.transactions.get(
